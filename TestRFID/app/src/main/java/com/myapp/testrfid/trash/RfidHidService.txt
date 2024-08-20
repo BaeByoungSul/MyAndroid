@@ -1,0 +1,584 @@
+/*
+ * Copyright (C) Apulsetech,co.ltd
+ * Apulsetech, Shenzhen, China
+ *
+ * All rights reserved.
+ *
+ * Permission to use, copy, modify, and distribute this software for any
+ * purpose without fee is hereby granted, provided that this entire notice is
+ * included in all copies of any software which is or includes a copy or
+ * modification of this software and in all copies of the supporting
+ * documentation for such software.
+ *
+ * THIS SOFTWARE IS BEING PROVIDED "AS IS", WITHOUT ANY EXPRESS OR IMPLIED
+ * WARRANTY. IN PARTICULAR, NEITHER THE AUTHOR NOR APULSETECH MAKES ANY
+ * REPRESENTATION OR WARRANTY OF ANY KIND CONCERNING THE MERCHANTABILITY OF
+ * THIS SOFTWARE OR ITS FITNESS FOR ANY PARTICULAR PURPOSE.
+ *
+ *
+ * Project: ⍺X11 SDK
+ *
+ * File: RfidHidService.java
+ * Date: 2016.11.17
+ * Author: Tony Park, tonypark@apulsetech.com
+ *
+ ****************************************************************************
+ */
+package com.myapp.testrfid.service
+
+import android.app.Notification
+import android.app.Service
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.res.Configuration
+import android.os.Binder
+import android.os.Handler
+import android.os.SystemClock
+import android.view.InputEvent
+import android.view.KeyEvent
+import com.apulsetech.app.demo.R
+import com.apulsetech.lib.event.DeviceEvent
+import com.apulsetech.lib.event.ReaderEventListener
+import com.apulsetech.lib.remote.type.RemoteDevice
+import com.apulsetech.lib.rfid.Reader
+import com.apulsetech.lib.rfid.type.RfidResult
+import com.apulsetech.lib.util.LogUtil
+import java.lang.reflect.InvocationTargetException
+import java.lang.reflect.Method
+import java.util.Locale
+import java.util.Queue
+import java.util.concurrent.ConcurrentLinkedQueue
+
+class RfidHidService : Service(), ReaderEventListener {
+
+
+    //private static final String INJECTOR_DEVICE_NAME = "hid-rfid";
+    private val mBinder: LocalBinder = LocalBinder()
+    private var mHandler: Handler? = null
+    private var mInputManager: InputManager? = null
+    private var mInjectionMethod: Method? = null
+    var mClipboardManager: ClipboardManager? = null
+    private var mNotificationManager: NotificationManager? = null
+    var reader: Reader? = null
+        private set
+    private var mHidSetting: HidSetting = HidSetting()
+    private var mSoundUtil: SoundUtil? = null
+    private var mInjectionThread: Thread? = null
+    private val mTagDataQue: Queue<String> = ConcurrentLinkedQueue()
+    private val mTagList: MutableList<String> = ArrayList()
+    private var mInventoryStarted = false
+    private var notifyEnabled = false
+    override fun onCreate() {
+        LogUtil.log(LogUtil.LV_D, D, TAG, "onCreate()")
+        super.onCreate()
+        initialize()
+    }
+
+    override fun onStartCommand(intent: Intent, flags: Int, startId: Int): Int {
+        LogUtil.log(
+            LogUtil.LV_D, D, TAG,
+            "onStartCommand() intent=" + intent
+                    + ", flags=" + String.format(
+                Locale.US,
+                "0x%08x",
+                flags
+            ) + ", startId=" + startId
+        )
+        val remoteDevice: RemoteDevice =
+            intent.getParcelableExtra<RemoteDevice>(IntentExtras.REMOTE_DEVICE)
+        val connectionTimeout = intent.getIntExtra(
+            IntentExtras.REMOTE_CONNECTION_TIMEOUT,
+            ConfigValues.DEFAULT_REMOTE_CONNECTION_TIMEOUT_IN_MS
+        )
+        if (remoteDevice != null) {
+            LogUtil.log(
+                LogUtil.LV_D, D, TAG,
+                "Remote Device: " + remoteDevice.toString() +
+                        " with timeout=" + connectionTimeout
+            )
+        }
+        start(remoteDevice, connectionTimeout)
+        return super.onStartCommand(intent, flags, startId)
+    }
+
+    override fun onDestroy() {
+        LogUtil.log(LogUtil.LV_D, D, TAG, "onDestroy()")
+        stop()
+        super.onDestroy()
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        LogUtil.log(LogUtil.LV_D, D, TAG, "onConfigurationChanged()")
+        super.onConfigurationChanged(newConfig)
+    }
+
+    override fun onLowMemory() {
+        LogUtil.log(LogUtil.LV_D, D, TAG, "onLowMemory()")
+        super.onLowMemory()
+    }
+
+    override fun onTrimMemory(level: Int) {
+        LogUtil.log(LogUtil.LV_D, D, TAG, "onTrimMemory()")
+        super.onTrimMemory(level)
+    }
+
+    @Nullable
+    override fun onBind(intent: Intent): IBinder? {
+        LogUtil.log(LogUtil.LV_D, D, TAG, "onBind()")
+        return mBinder
+    }
+
+    override fun onUnbind(intent: Intent): Boolean {
+        LogUtil.log(LogUtil.LV_D, D, TAG, "onUnbind()")
+        return super.onUnbind(intent)
+    }
+
+    override fun onRebind(intent: Intent) {
+        LogUtil.log(LogUtil.LV_D, D, TAG, "onRebind()")
+        super.onRebind(intent)
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent) {
+        LogUtil.log(LogUtil.LV_D, D, TAG, "onTaskRemoved()")
+        super.onTaskRemoved(rootIntent)
+    }
+
+    inner class LocalBinder : Binder() {
+        fun getService(h: Handler?): RfidHidService {
+            setHandler(h)
+            return this@RfidHidService
+        }
+    }
+
+    fun setHandler(h: Handler?) {
+        mHandler = h
+    }
+
+    private fun initialize() {
+        LogUtil.log(LogUtil.LV_D, D, TAG, "initialize()")
+        mClipboardManager = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+        mNotificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        mSoundUtil = SoundUtil(this)
+        mSoundUtil.createSoundPool(R.raw.success, R.raw.fail)
+
+        //Injector.startInjection(INJECTOR_DEVICE_NAME);
+        try {
+            val cl: Class<InputManager> = InputManager::class.java
+            val method = cl.getMethod("getInstance")
+            val result = method.invoke(cl)
+            mInputManager = result as InputManager
+            mInjectionMethod = cl.getMethod(
+                "injectInputEvent",
+                InputEvent::class.java,
+                Int::class.javaPrimitiveType
+            )
+        } catch (e: IllegalAccessException) {
+            e.printStackTrace()
+        } catch (e: InvocationTargetException) {
+            e.printStackTrace()
+        } catch (e: NoSuchMethodException) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun start(remoteDevice: RemoteDevice?, timeout: Int) {
+        reader = Reader.getReader(this, true)
+        if (reader != null) {
+            reader!!.setEventListener(this)
+            if (reader!!.start()) {
+                LogUtil.log(LogUtil.LV_D, D, TAG, "Reader open success!")
+                reader!!.setInventoryRssiReportState(RFID.OFF)
+            } else {
+                LogUtil.log(LogUtil.LV_E, D, TAG, "Reader open failed!")
+            }
+        } else {
+            LogUtil.log(LogUtil.LV_E, D, TAG, "Reader instance is null!")
+        }
+        val filter = IntentFilter()
+        filter.addAction(ACTION_BUTTON_DOWN)
+        filter.addAction(ACTION_BUTTON_UP)
+        registerReceiver(mBroadcastReceiver, filter)
+        if (FOREGROUND) {
+            startForeground(ID_NOTIFICATION, makeNotification())
+            notifyEnabled = true
+        } else {
+            enableNotification()
+        }
+    }
+
+    private fun stop() {
+        LogUtil.log(LogUtil.LV_D, D, TAG, "stop()")
+
+        //Injector.stopInjection();
+        unregisterReceiver(mBroadcastReceiver)
+        if (FOREGROUND) {
+            stopForeground(true)
+            notifyEnabled = true
+        } else {
+            disableNotification()
+        }
+        mSoundUtil.deleteSoundPool()
+        if (reader != null) {
+            reader!!.stop()
+            reader!!.destroy()
+            reader!!.removeEventListener(this)
+            reader = null
+        } else {
+            LogUtil.log(LogUtil.LV_E, D, TAG, "Reader instance is null!")
+        }
+        mHandler!!.sendEmptyMessage(RfidHidActivity.MSG_SERVICE_STOPPED)
+    }
+
+    private fun makeNotification(): Notification {
+        val notifyIntent = Intent(this, RfidHidActivity::class.java)
+        notifyIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        val pendingIntent: PendingIntent = PendingIntent.getActivities(
+            this,
+            0, arrayOf<Intent>(notifyIntent),
+            PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        return Notification.Builder(this)
+            .setSmallIcon(R.drawable.ic_hid_rfid_service)
+            .setContentTitle(getString(R.string.app_hid_rfid))
+            .setContentText(getString(R.string.rfid_hid_notification_discription))
+            .setAutoCancel(false)
+            .setContentIntent(pendingIntent)
+            .build()
+    }
+
+    private fun enableNotification() {
+        LogUtil.log(LogUtil.LV_D, D, TAG, "enableNotification()")
+        if (notifyEnabled) {
+            LogUtil.log(LogUtil.LV_D, D, TAG, "Notification already enabled!")
+            return
+        }
+        mNotificationManager.notify(TAG_NOTIFICATION, ID_NOTIFICATION, makeNotification())
+        notifyEnabled = true
+    }
+
+    private fun disableNotification() {
+        LogUtil.log(LogUtil.LV_D, D, TAG, "disableNotification()")
+        if (!notifyEnabled) {
+            LogUtil.log(LogUtil.LV_D, D, TAG, "Notification already disabled!")
+            return
+        }
+        mNotificationManager.cancel(TAG_NOTIFICATION, ID_NOTIFICATION)
+        notifyEnabled = false
+    }
+
+    fun startInventory(): Boolean {
+        LogUtil.log(LogUtil.LV_D, D, TAG, "startInventory()")
+        if (reader == null) {
+            LogUtil.log(LogUtil.LV_W, D, TAG, "Reader is not running!")
+            return false
+        }
+        if (reader!!.isOperationRunning) {
+            return true
+        }
+        LogUtil.log(LogUtil.LV_D, D, TAG, "continuous=" + mHidSetting.mContinuousModeEnabled)
+        return reader!!.startInventory() == RfidResult.SUCCESS
+    }
+
+    fun stopOperation(): Boolean {
+        LogUtil.log(LogUtil.LV_D, D, TAG, "stopOperation()")
+        if (reader == null) {
+            LogUtil.log(LogUtil.LV_W, D, TAG, "Reader is not running!")
+            return false
+        }
+        return if (reader!!.isOperationRunning) {
+            reader!!.stopOperation() == RfidResult.SUCCESS
+        } else true
+    }
+
+    val isInventoryRunning: Boolean
+        get() = if (reader == null) {
+            false
+        } else reader!!.isOperationRunning
+    var hidSetting: HidSetting
+        get() = mHidSetting
+        set(setting) {
+            LogUtil.log(
+                LogUtil.LV_D, D, TAG,
+                ((("setHidSetting() continuous=" + setting.mContinuousModeEnabled
+                        ).toString() + ", sound=" + setting.mSoundEnabled
+                        ).toString() + ", pc=" + setting.mPcReportEnabled
+                        ).toString() + ", toggle=" + setting.mToggleEnabled
+            )
+            if (reader == null) {
+                LogUtil.log(LogUtil.LV_W, D, TAG, "Reader is not running!")
+                return
+            }
+            if (reader!!.isOperationRunning) {
+                reader!!.stopOperation()
+            }
+            mHidSetting = setting
+            reader.setInventoryMode(if (setting.mContinuousModeEnabled) RFID.InventoryMode.MULTI else RFID.InventoryMode.SINGLE)
+            reader.setToggle(if (setting.mToggleEnabled) RFID.ON else RFID.OFF)
+        }
+    private val mInectionRunnable = Runnable {
+        val kcm: KeyCharacterMap = KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD)
+        while (!mTagDataQue.isEmpty()) {
+            val data = mTagDataQue.poll()
+            if (data != null) {
+                val events: Array<KeyEvent> = kcm.getEvents(data.toCharArray())
+                if (events != null) {
+                    for (event in events) {
+                        val now = SystemClock.uptimeMillis()
+                        try {
+                            mInjectionMethod!!.invoke(
+                                mInputManager,
+                                KeyEvent(
+                                    now, now, event.action, event.keyCode,
+                                    0, 0, KeyCharacterMap.VIRTUAL_KEYBOARD,
+                                    0, 0, InputDevice.SOURCE_KEYBOARD
+                                ),
+                                2
+                            )
+                        } catch (e: IllegalAccessException) {
+                            e.printStackTrace()
+                        } catch (e: InvocationTargetException) {
+                            e.printStackTrace()
+                        }
+                    }
+                } else {
+                    LogUtil.log(LogUtil.LV_D, D, TAG, "events is null!")
+                }
+            }
+        }
+    }
+
+    private fun injectDataByKeyInput(data: String) {
+        LogUtil.log(
+            LogUtil.LV_D, D, TAG,
+            "injectDataByKeyInput() data=$data"
+        )
+        mTagDataQue.offer(data)
+        if (mInjectionThread == null) {
+            mInjectionThread = Thread(mInectionRunnable)
+            mInjectionThread!!.start()
+        } else {
+            if (!mInjectionThread!!.isAlive && mInjectionThread!!.state == Thread.State.TERMINATED) {
+                mInjectionThread = Thread(mInectionRunnable)
+                mInjectionThread!!.start()
+            }
+        }
+    }
+
+    private fun injectDataByClipboardCopy(data: String) {
+        LogUtil.log(
+            LogUtil.LV_D, D, TAG,
+            "injectDataByClipboardCopy() data=$data"
+        )
+        val clip: ClipData = ClipData.newPlainText(LABEL_BARCODE_DATA, data)
+        mClipboardManager!!.setPrimaryClip(clip)
+    }
+
+    private fun injectTagData(data: String) {
+        LogUtil.log(
+            LogUtil.LV_D, D, TAG,
+            "injectBarcodeData() data=$data"
+        )
+        var finalData: String
+        finalData = if (mHidSetting.mPrefix != null && !mHidSetting.mPrefix.isEmpty()) {
+            mHidSetting.mPrefix.concat(data)
+        } else {
+            data
+        }
+        if (mHidSetting.mPostFix != null && !mHidSetting.mPostFix.isEmpty()) {
+            finalData = finalData + mHidSetting.mPostFix
+        }
+        finalData = finalData + mHidSetting.mDataTerminator.string()
+        if (mHidSetting.mInjectionMethod === HidSetting.InjectionMethod.INJECTION_BY_CLIPBOARD_COPY) {
+            injectDataByClipboardCopy(finalData)
+        } else {
+            injectDataByKeyInput(finalData)
+        }
+    }
+
+    private fun sendMessage(msgId: Int) {
+        if (mHandler != null) {
+            mHandler!!.sendEmptyMessage(msgId)
+        }
+    }
+
+    private fun sendMessage(msgId: Int, obj: Any) {
+        if (mHandler != null) {
+            mHandler!!.obtainMessage(msgId, obj)
+        }
+    }
+
+    private fun processKeyDown() {
+        LogUtil.log(LogUtil.LV_D, D, TAG, "processKeyDown()")
+        if (!mInventoryStarted) {
+            mTagList.clear()
+            val ret = reader!!.startInventory()
+            if (ret == RfidResult.SUCCESS) {
+                mInventoryStarted = true
+                sendMessage(RfidHidActivity.MSG_READER_STARTED)
+            } else if (ret == RfidResult.LOW_BATTERY) {
+                Toast.makeText(
+                    this@RfidHidService,
+                    R.string.rfid_alert_low_battery_warning,
+                    Toast.LENGTH_SHORT
+                ).show()
+            } else {
+                Toast.makeText(
+                    this@RfidHidService,
+                    R.string.rfid_alert_start_inventory_failed,
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        } else {
+            val ret = reader!!.stopOperation()
+            if (ret == RfidResult.SUCCESS) {
+                mInventoryStarted = false
+                sendMessage(RfidHidActivity.MSG_READER_STOPPED)
+            } else if (ret == RfidResult.STOP_FAILED_TRY_AGAIN) {
+                Toast.makeText(
+                    this@RfidHidService,
+                    R.string.rfid_alert_stop_inventory_failed,
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
+
+    private fun processKeyUp() {
+        LogUtil.log(LogUtil.LV_D, D, TAG, "processKeyUp()")
+        if (mInventoryStarted && !mHidSetting.mHoldTrigger) {
+            val ret = reader!!.stopOperation()
+            if (ret == RfidResult.SUCCESS) {
+                mInventoryStarted = false
+                sendMessage(RfidHidActivity.MSG_READER_STOPPED)
+            } else if (ret == RfidResult.STOP_FAILED_TRY_AGAIN) {
+                Toast.makeText(
+                    this@RfidHidService,
+                    R.string.rfid_alert_stop_inventory_failed,
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
+
+    private val mBroadcastReceiver: BroadcastReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val action = intent.action
+            val origin = intent.getIntExtra(KEY_ORIGIN, TAG_ORIGIN_UNIFIED_DEMO)
+            val keyCode = intent.getIntExtra(KEY_CODE, KeyEvent.KEYCODE_UNKNOWN)
+            LogUtil.log(
+                LogUtil.LV_D, D, TAG,
+                "onReceive() action=$action, origin=$origin"
+            )
+            if (origin != TAG_ORIGIN_UNIFIED_DEMO) {
+                LogUtil.log(
+                    LogUtil.LV_D, D, TAG,
+                    "Key broadcast not for RFID HID!"
+                )
+                return
+            }
+            if (keyCode == KeyEvent.KEYCODE_SHIFT_RIGHT) {
+                if (ACTION_BUTTON_DOWN == action) {
+                    processKeyDown()
+                } else if (ACTION_BUTTON_UP == action) {
+                    processKeyUp()
+                }
+            }
+        }
+    }
+
+    override fun onReaderDeviceStateChanged(state: DeviceEvent) {
+        LogUtil.log(LogUtil.LV_D, D, TAG, "DeviceEvent : $state")
+        if (state == DeviceEvent.DISCONNECTED) {
+            reader = null
+            sendMessage(RfidHidActivity.MSG_SERVICE_DISCONNECTED)
+        } else if (state == DeviceEvent.USB_CHARGING_ENABLED) {
+            Notice.ShowUsbChargingEnabledAlert(this)
+        }
+    }
+
+    override fun onReaderEvent(event: Int, result: Int, @Nullable data: String?) {
+        LogUtil.log(
+            LogUtil.LV_D, D, TAG, "onReaderEvent(): event=" + event
+                    + ", result=" + result
+                    + ", data=" + data
+        )
+        when (event) {
+            Reader.READER_CALLBACK_EVENT_INVENTORY, Reader.READER_CALLBACK_EVENT_READ -> if (result == RfidResult.SUCCESS) {
+                if (data != null) {
+                    val tagData = data.trim { it <= ' ' }
+                    if (mHidSetting.mContinuousModeEnabled) {
+                        if (mTagList.contains(tagData)) {
+                            return
+                        } else {
+                            mTagList.add(tagData)
+                        }
+                    }
+                    injectTagData(tagData)
+                    if (mHidSetting.mSoundEnabled) {
+                        mSoundUtil.playRfidSound(R.raw.success)
+                    }
+                }
+            }
+
+            Reader.READER_CALLBACK_EVENT_START_INVENTORY -> if (!mInventoryStarted) {
+                mInventoryStarted = true
+                sendMessage(RfidHidActivity.MSG_READER_STARTED)
+            }
+
+            Reader.READER_CALLBACK_EVENT_STOP_INVENTORY -> if (mInventoryStarted && !reader!!.isOperationRunning) {
+                mInventoryStarted = false
+                mTagList.clear()
+                sendMessage(RfidHidActivity.MSG_READER_STOPPED)
+            }
+        }
+    }
+
+    override fun onReaderRemoteKeyEvent(action: Int, keyCode: Int) {
+        LogUtil.log(
+            LogUtil.LV_D, D, TAG,
+            "onReaderRemoteKeyEvent : action=$action keyCode=$keyCode"
+        )
+        if (keyCode == KeyEvent.KEYCODE_SHIFT_RIGHT) {
+            if (action == KeyEvent.ACTION_DOWN) {
+                processKeyDown()
+            } else if (action == KeyEvent.ACTION_UP) {
+                processKeyUp()
+            }
+        }
+    }
+
+    override fun onReaderRemoteSettingChanged(type: Int, value: Any) {
+        LogUtil.log(
+            LogUtil.LV_D, D, TAG,
+            "onReaderRemoteSettingChanged : type=$type value=$value"
+        )
+        when (type) {
+            RemoteSetting.RFID_INVENTORY_MODE -> {
+                mHidSetting.mContinuousModeEnabled = value as Boolean
+                sendMessage(RfidHidActivity.MSG_REMOTE_INVENTORY_MODE_CHANGED, value)
+            }
+
+            RemoteSetting.RFID_POWER -> {}
+        }
+    }
+
+    companion object {
+        @Suppress("unused")
+        private val TAG = "RfidHidService"
+
+        @Suppress("unused")
+        private val D = true
+        private const val FOREGROUND = true
+        private const val ACTION_BUTTON_DOWN = "com.apulsetech.action.BUTTON_DOWN"
+        private const val ACTION_BUTTON_UP = "com.apulsetech.action.BUTTON_UP"
+        private const val CHANNEL_NOTIFICATION = "RFID HID"
+        private const val TAG_NOTIFICATION = "RfidHidService"
+        private const val LABEL_BARCODE_DATA = "barcode"
+        private const val ID_NOTIFICATION = 2
+        private const val TAG_ORIGIN_UNIFIED_DEMO = 1
+        private const val KEY_ORIGIN = "origin"
+        private const val KEY_CODE = "key_code"
+    }
+}

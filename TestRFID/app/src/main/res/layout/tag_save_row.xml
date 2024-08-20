@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:padding="5dp"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <TextView
+        android:id="@+id/hexValueTextView"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="5dp"
+        tools:text="Hex Value"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+         />
+
+    <TextView
+        android:id="@+id/tagValueTextView"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        tools:text="tag Value"
+        app:layout_constraintHorizontal_weight="1"
+        app:layout_constraintEnd_toStartOf="@id/rssiMvTextView"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/hexValueTextView"
+        />
+    <TextView
+        android:id="@+id/rssiMvTextView"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        tools:text="mean"
+        app:layout_constraintHorizontal_weight="0.5"
+        app:layout_constraintEnd_toStartOf="@id/dupCountTextView"
+        app:layout_constraintStart_toEndOf="@id/tagValueTextView"
+        app:layout_constraintTop_toBottomOf="@id/hexValueTextView"
+        />
+    <TextView
+        android:id="@+id/dupCountTextView"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        tools:text="dup Count"
+        app:layout_constraintHorizontal_weight="0.5"
+        app:layout_constraintEnd_toStartOf="@id/resultTextView"
+        app:layout_constraintStart_toEndOf="@id/rssiMvTextView"
+        app:layout_constraintTop_toBottomOf="@id/hexValueTextView"
+        />
+    <TextView
+        android:id="@+id/resultTextView"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        tools:text="result Value"
+
+        app:layout_constraintHorizontal_weight="1"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toEndOf="@id/dupCountTextView"
+        app:layout_constraintTop_toBottomOf="@id/hexValueTextView"
+        />
+</androidx.constraintlayout.widget.ConstraintLayout>
